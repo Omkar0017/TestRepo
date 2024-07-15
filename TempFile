@@ -1,0 +1,257 @@
+application.yml
+--------------
+spring:
+  kafka:
+    consumer:
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      concurrency: 3
+    properties:
+      specific.avro.reader: true
+
+kafka:
+  clusters:
+    - name: cluster1
+      bootstrap-servers: localhost:9092
+      group-id: cluster1-group
+      topics:
+        string-topics:
+          - topicName: topic1
+            application: app1
+          - topicName: topic2
+            application: app2
+        avro-topics:
+          - topicName: topic3
+            application: app1
+          - topicName: topic4
+            application: app2
+    - name: cluster2
+      bootstrap-servers: localhost:9093
+      group-id: cluster2-group
+      topics:
+        string-topics:
+          - topicName: topic1
+            application: app3
+          - topicName: topic2
+            application: app4
+        avro-topics:
+          - topicName: topic3
+            application: app3
+          - topicName: topic4
+            application: app4
+****************************************************************
+configs
+---------
+package com.example.kafkaconsumer.config;
+
+import org.apache.avro.generic.GenericRecord;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.annotation.EnableKafka;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
+import org.springframework.kafka.listener.config.ContainerProperties.AckMode;
+import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@EnableKafka
+@Configuration
+public class KafkaConsumerConfig {
+
+  @Value("${spring.kafka.consumer.auto-offset-reset}")
+  private String autoOffsetReset;
+
+  @Value("${spring.kafka.listener.concurrency}")
+  private int concurrency;
+
+  @Value("${kafka.clusters}")
+  private List<ClusterConfig> clusters;
+
+  @Bean
+  public Map<String, ConcurrentKafkaListenerContainerFactory<String, Object>> kafkaListenerContainerFactories() {
+    Map<String, ConcurrentKafkaListenerContainerFactory<String, Object>> factories = new HashMap<>();
+    for (ClusterConfig cluster : clusters) {
+      factories.putAll(createFactoriesForCluster(cluster));
+    }
+    return factories;
+  }
+
+  private Map<String, ConcurrentKafkaListenerContainerFactory<String, Object>> createFactoriesForCluster(ClusterConfig cluster) {
+    Map<String, ConcurrentKafkaListenerContainerFactory<String, Object>> factories = new HashMap<>();
+
+    for (TopicConfig topic : cluster.getStringTopics()) {
+      String factoryName = cluster.getName() + "-string";
+      if (!factories.containsKey(factoryName)) {
+        factories.put(factoryName, createFactory(cluster.getBootstrapServers(), cluster.getGroupId(), StringDeserializer.class));
+      }
+    }
+
+    for (TopicConfig topic : cluster.getAvroTopics()) {
+      String factoryName = cluster.getName() + "-avro";
+      if (!factories.containsKey(factoryName)) {
+        factories.put(factoryName, createAvroFactory(cluster.getBootstrapServers(), cluster.getGroupId()));
+      }
+    }
+
+    return factories;
+  }
+
+  private ConcurrentKafkaListenerContainerFactory<String, Object> createFactory(String bootstrapServers, String groupId, Class<?> valueDeserializer) {
+    ConcurrentKafkaListenerContainerFactory<String, Object> factory = new ConcurrentKafkaListenerContainerFactory<>();
+    factory.setConsumerFactory(consumerFactory(bootstrapServers, groupId, valueDeserializer));
+    factory.setConcurrency(concurrency);
+    factory.getContainerProperties().setAckMode(AckMode.MANUAL);
+    return factory;
+  }
+
+  private ConcurrentKafkaListenerContainerFactory<String, Object> createAvroFactory(String bootstrapServers, String groupId) {
+    ConcurrentKafkaListenerContainerFactory<String, Object> factory = new ConcurrentKafkaListenerContainerFactory<>();
+    factory.setConsumerFactory(avroConsumerFactory(bootstrapServers, groupId));
+    factory.setConcurrency(concurrency);
+    factory.getContainerProperties().setAckMode(AckMode.MANUAL);
+    return factory;
+  }
+
+  private ConsumerFactory<String, Object> consumerFactory(String bootstrapServers, String groupId, Class<?> valueDeserializer) {
+    Map<String, Object> props = consumerConfigs(bootstrapServers, groupId);
+    props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, valueDeserializer);
+    return new DefaultKafkaConsumerFactory<>(props);
+  }
+
+  private ConsumerFactory<String, GenericRecord> avroConsumerFactory(String bootstrapServers, String groupId) {
+    Map<String, Object> props = consumerConfigs(bootstrapServers, groupId);
+    props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, io.confluent.kafka.serializers.KafkaAvroDeserializer.class);
+    return new DefaultKafkaConsumerFactory<>(props);
+  }
+
+  private Map<String, Object> consumerConfigs(String bootstrapServers, String groupId) {
+    Map<String, Object> props = new HashMap<>();
+    props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+    props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+    props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset);
+    props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+    props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+    return props;
+  }
+}
+
+class ClusterConfig {
+  private String name;
+  private String bootstrapServers;
+  private String groupId;
+  private List<TopicConfig> stringTopics;
+  private List<TopicConfig> avroTopics;
+
+  // Getters and setters
+  public String getName() { return name; }
+  public void setName(String name) { this.name = name; }
+  public String getBootstrapServers() { return bootstrapServers; }
+  public void setBootstrapServers(String bootstrapServers) { this.bootstrapServers = bootstrapServers; }
+  public String getGroupId() { return groupId; }
+  public void setGroupId(String groupId) { this.groupId = groupId; }
+  public List<TopicConfig> getStringTopics() { return stringTopics; }
+  public void setStringTopics(List<TopicConfig> stringTopics) { this.stringTopics = stringTopics; }
+  public List<TopicConfig> getAvroTopics() { return avroTopics; }
+  public void setAvroTopics(List<TopicConfig> avroTopics) { this.avroTopics = avroTopics; }
+}
+
+class TopicConfig {
+  private String topicName;
+  private String application;
+
+  // Getters and setters
+  public String getTopicName() { return topicName; }
+  public void setTopicName(String topicName) { this.topicName = topicName; }
+  public String getApplication() { return application; }
+  public void setApplication(String application) { this.application = application; }
+}
+
+
+
+****************************************************************************************
+Listeners
+-----------
+
+
+
+package com.example.kafkaconsumer.listener;
+
+import com.example.kafkaconsumer.config.ClusterConfig;
+import com.example.kafkaconsumer.config.TopicConfig;
+import org.apache.kafka.common.header.Headers;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+@Component
+public class KafkaListeners {
+
+  @Autowired
+  private List<ClusterConfig> clusters;
+
+  @KafkaListener(
+      topics = "#{'${kafka.clusters[0].topics.string-topics.*.topicName}'.split(',')}",
+      containerFactory = "cluster1-string"
+  )
+  public void listenCluster1String(String message, @Header(KafkaHeaders.RECEIVED_TOPIC) String topic, Acknowledgment ack) {
+    String application = getApplicationByTopic(topic, "cluster1", "string");
+    System.out.println("Received message in cluster 1: " + message + " from topic: " + topic + " for application: " + application);
+    ack.acknowledge();
+  }
+
+  @KafkaListener(
+      topics = "#{'${kafka.clusters[0].topics.avro-topics.*.topicName}'.split(',')}",
+      containerFactory = "cluster1-avro"
+  )
+  public void listenCluster1Avro(String message, @Header(KafkaHeaders.RECEIVED_TOPIC) String topic, Acknowledgment ack) {
+    String application = getApplicationByTopic(topic, "cluster1", "avro");
+    System.out.println("Received message in cluster 1: " + message + " from topic: " + topic + " for application: " + application);
+    ack.acknowledge();
+  }
+
+  @KafkaListener(
+      topics = "#{'${kafka.clusters[1].topics.string-topics.*.topicName}'.split(',')}",
+      containerFactory = "cluster2-string"
+  )
+  public void listenCluster2String(String message, @Header(KafkaHeaders.RECEIVED_TOPIC) String topic, Acknowledgment ack) {
+    String application = getApplicationByTopic(topic, "cluster2", "string");
+    System.out.println("Received message in cluster 2: " + message + " from topic: " + topic + " for application: " + application);
+    ack.acknowledge();
+  }
+
+  @KafkaListener(
+      topics = "#{'${kafka.clusters[1].topics.avro-topics.*.topicName}'.split(',')}",
+      containerFactory = "cluster2-avro"
+  )
+  public void listenCluster2Avro(String message, @Header(KafkaHeaders.RECEIVED_TOPIC) String topic, Acknowledgment ack) {
+    String application = getApplicationByTopic(topic, "cluster2", "avro");
+    System.out.println("Received message in cluster 2: " + message + " from topic: " + topic + " for application: " + application);
+    ack.acknowledge();
+  }
+
+  private String getApplicationByTopic(String topic, String clusterName, String serde) {
+    for (ClusterConfig cluster : clusters) {
+      if (cluster.getName().equals(clusterName)) {
+        List<TopicConfig> topics = "string".equals(serde) ? cluster.getStringTopics() : cluster.getAvroTopics();
+        for (TopicConfig topicConfig : topics) {
+          if (topicConfig.getTopicName().equals(topic)) {
+            return topicConfig.getApplication();
+          }
+        }
+      }
+    }
+    return "Unknown";
+  }
+}
